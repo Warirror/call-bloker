@@ -5,6 +5,7 @@ const {
   DisconnectReason
 } = require("@whiskeysockets/baileys");
 const pino = require("pino");
+const readline = require("readline");
 
 const app = express();
 const PORT = process.env.PORT || 10000;
@@ -14,33 +15,65 @@ app.get("/", (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log(`🌐 Server running on port ${PORT}`);
 });
 
+const rl = readline.createInterface({
+  input: process.stdin,
+  output: process.stdout
+});
+
+function ask(question) {
+  return new Promise(resolve => {
+    rl.question(question, answer => resolve(answer.trim()));
+  });
+}
+
 async function startBot() {
-  const { state, saveCreds } = await useMultiFileAuthState("./auth_info");
+  const { state, saveCreds } =
+    await useMultiFileAuthState("./auth_info");
 
   const sock = makeWASocket({
     auth: state,
     logger: pino({ level: "silent" }),
-    printQRInTerminal: true
+    printQRInTerminal: false
   });
 
   sock.ev.on("creds.update", saveCreds);
 
-  // 📵 Automatically reject incoming WhatsApp calls
+  // 📵 Reject incoming calls
   sock.ev.on("call", async (calls) => {
     for (const call of calls) {
       if (call.status === "offer") {
         try {
           await sock.rejectCall(call.id, call.from);
-          console.log(`📵 Call rejected from: ${call.from}`);
-        } catch (error) {
-          console.log("❌ Call reject error:", error.message);
+          console.log(`📵 Call rejected: ${call.from}`);
+        } catch (err) {
+          console.log("❌ Reject error:", err.message);
         }
       }
     }
   });
+
+  // 🔐 Pairing code
+  if (!sock.authState?.creds?.registered) {
+    const phoneNumber = await ask(
+      "📱 Enter WhatsApp number with country code (example: 919876543210): "
+    );
+
+    try {
+      const code = await sock.requestPairingCode(phoneNumber);
+      console.log("\n================================");
+      console.log("🔐 YOUR PAIRING CODE:");
+      console.log(code);
+      console.log("================================\n");
+      console.log(
+        "WhatsApp → Settings → Linked Devices → Link a Device → Link with phone number"
+      );
+    } catch (err) {
+      console.log("❌ Pairing error:", err.message);
+    }
+  }
 
   sock.ev.on("connection.update", ({ connection, lastDisconnect }) => {
     if (connection === "open") {
@@ -48,13 +81,10 @@ async function startBot() {
     }
 
     if (connection === "close") {
-      const shouldReconnect =
-        lastDisconnect?.error?.output?.statusCode !==
-        DisconnectReason.loggedOut;
+      const statusCode =
+        lastDisconnect?.error?.output?.statusCode;
 
-      console.log("❌ Connection closed");
-
-      if (shouldReconnect) {
+      if (statusCode !== DisconnectReason.loggedOut) {
         console.log("🔄 Reconnecting...");
         startBot();
       } else {
